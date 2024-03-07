@@ -3206,6 +3206,12 @@ dummy_func(
 #endif
         }
 
+        // Pseudo uop for inlineable _PUSH_FRAME -- replaced by _PUSH_FRAME if not.
+        op(_PUSH_FRAME_INLINEABLE, (new_frame: _PyInterpreterFrame* -- unused if (0))) {
+            (void)new_frame;
+            assert(0);
+        }
+
         macro(CALL_BOUND_METHOD_EXACT_ARGS) =
             unused/1 + // Skip over the counter
             _CHECK_PEP_523 +
@@ -4183,6 +4189,42 @@ dummy_func(
             DEOPT_IF(!current_executor->vm_data.valid);
             frame->instr_ptr = (_Py_CODEUNIT *)instr_ptr;
         }
+
+        // Inlining prelude.
+        // Not too easy to express the stack effect.
+        op(_PRE_INLINE, (--)) {
+            // NULL out locals of the new inlined frame.
+            PyObject **end = frame->localsplus + oparg;
+            while (stack_pointer < end) {
+                *stack_pointer = NULL;
+                stack_pointer++;
+            }
+            CHECK_EVAL_BREAKER();
+        }
+
+        // Inlining postlude
+        op(_POST_INLINE, ( -- retval)) {
+            // clear the locals
+            PyObject *ret = PEEK(1);
+            stack_pointer--;
+            PyObject **end = stack_pointer - oparg;
+            while (stack_pointer > end) {
+                Py_CLEAR(stack_pointer[-1]);
+                stack_pointer--;
+            }
+            retval = ret;
+            CHECK_EVAL_BREAKER();
+        }
+
+        op(_GROW_TIER2_FRAME, (--)) {
+            DEOPT_IF(frame->owner != FRAME_OWNED_BY_THREAD);
+            assert(stack_pointer <= tstate->datastack_top);
+            if (stack_pointer + oparg > tstate->datastack_top) {
+                DEOPT_IF(stack_pointer + oparg > tstate->datastack_limit);
+                tstate->datastack_top = stack_pointer + oparg;
+            }
+        }
+
 
 // END BYTECODES //
 

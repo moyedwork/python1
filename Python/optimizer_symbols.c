@@ -302,6 +302,8 @@ _Py_uop_frame_new(
     frame->locals = localsplus_start;
     frame->stack = frame->locals + co->co_nlocalsplus;
     frame->stack_pointer = frame->stack + curr_stackentries;
+    frame->real_localsplus = NULL;
+    frame->is_inlineable = false;
     ctx->n_consumed = localsplus_start + (co->co_nlocalsplus + co->co_stacksize);
     if (ctx->n_consumed >= ctx->limit) {
         return NULL;
@@ -362,6 +364,12 @@ _Py_uop_abstractcontext_init(_Py_UOpsContext *ctx)
     ctx->curr_frame_depth = 0;
 
     return 0;
+}
+
+_Py_UOpsAbstractFrame *
+_Py_uop_prev_frame(_Py_UOpsContext *ctx)
+{
+    return &ctx->frames[ctx->curr_frame_depth - 2];
 }
 
 int

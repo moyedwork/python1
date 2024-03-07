@@ -3105,6 +3105,15 @@
             break;
         }
 
+        case _PUSH_FRAME_INLINEABLE: {
+            _PyInterpreterFrame *new_frame;
+            new_frame = (_PyInterpreterFrame *)stack_pointer[-1];
+            (void)new_frame;
+            assert(0);
+            stack_pointer += -1;
+            break;
+        }
+
         /* _CALL_PY_WITH_DEFAULTS is not a viable micro-op for tier 2 */
 
         case _CALL_TYPE_1: {
@@ -3949,6 +3958,47 @@
             PyObject *instr_ptr = (PyObject *)CURRENT_OPERAND();
             if (!current_executor->vm_data.valid) goto deoptimize;
             frame->instr_ptr = (_Py_CODEUNIT *)instr_ptr;
+            break;
+        }
+
+        case _PRE_INLINE: {
+            oparg = CURRENT_OPARG();
+            // NULL out locals of the new inlined frame.
+            PyObject **end = frame->localsplus + oparg;
+            while (stack_pointer < end) {
+                *stack_pointer = NULL;
+                stack_pointer++;
+            }
+            CHECK_EVAL_BREAKER();
+            break;
+        }
+
+        case _POST_INLINE: {
+            PyObject *retval;
+            oparg = CURRENT_OPARG();
+            // clear the locals
+            PyObject *ret = PEEK(1);
+            stack_pointer--;
+            PyObject **end = stack_pointer - oparg;
+            while (stack_pointer > end) {
+                Py_CLEAR(stack_pointer[-1]);
+                stack_pointer--;
+            }
+            retval = ret;
+            stack_pointer[0] = retval;
+            stack_pointer += 1;
+            CHECK_EVAL_BREAKER();
+            break;
+        }
+
+        case _GROW_TIER2_FRAME: {
+            oparg = CURRENT_OPARG();
+            if (frame->owner != FRAME_OWNED_BY_THREAD) goto deoptimize;
+            assert(stack_pointer <= tstate->datastack_top);
+            if (stack_pointer + oparg > tstate->datastack_top) {
+                if (stack_pointer + oparg > tstate->datastack_limit) goto deoptimize;
+                tstate->datastack_top = stack_pointer + oparg;
+            }
             break;
         }
 

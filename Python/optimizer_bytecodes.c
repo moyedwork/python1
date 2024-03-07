@@ -38,7 +38,10 @@ optimize_to_bool(
     _Py_UopsSymbol **result_ptr);
 
 extern void
-eliminate_pop_guard(_PyUOpInstruction *this_instr, bool exit)
+eliminate_pop_guard(_PyUOpInstruction *this_instr, bool exit);
+
+extern int
+real_localsplus_idx(_Py_UOpsContext *ctx, int oparg);
 
 static int
 dummy_func(void) {
@@ -71,6 +74,7 @@ dummy_func(void) {
 
     op(_LOAD_FAST, (-- value)) {
         value = GETLOCAL(oparg);
+        REPLACE_OP(this_instr, _LOAD_FAST, oparg, real_localsplus_idx(ctx, oparg));
     }
 
     op(_LOAD_FAST_AND_CLEAR, (-- value)) {
@@ -78,10 +82,12 @@ dummy_func(void) {
         _Py_UopsSymbol *temp;
         OUT_OF_SPACE_IF_NULL(temp = sym_new_null(ctx));
         GETLOCAL(oparg) = temp;
+        REPLACE_OP(this_instr, _LOAD_FAST_AND_CLEAR, oparg, real_localsplus_idx(ctx, oparg));
     }
 
     op(_STORE_FAST, (value --)) {
         GETLOCAL(oparg) = value;
+        REPLACE_OP(this_instr, _STORE_FAST, oparg, real_localsplus_idx(ctx, oparg));
     }
 
     op(_PUSH_NULL, (-- res)) {
@@ -437,6 +443,12 @@ dummy_func(void) {
         }
     }
 
+    op(_LOAD_ATTR, (owner -- attr, self_or_null if (oparg & 1))) {
+        (void)owner;
+        OUT_OF_SPACE_IF_NULL(attr = sym_new_not_null(ctx));
+        OUT_OF_SPACE_IF_NULL(self_or_null = sym_new_unknown(ctx));
+    }
+
     op(_LOAD_ATTR_MODULE, (index/1, owner -- attr, null if (oparg & 1))) {
         (void)index;
         OUT_OF_SPACE_IF_NULL(null = sym_new_null(ctx));
@@ -521,6 +533,7 @@ dummy_func(void) {
 
     op(_INIT_CALL_PY_EXACT_ARGS, (callable, self_or_null, args[oparg] -- new_frame: _Py_UOpsAbstractFrame *)) {
         int argcount = oparg;
+        bool is_inlineable = false;
 
         (void)callable;
 
@@ -546,13 +559,18 @@ dummy_func(void) {
         if (sym_is_null(self_or_null) || sym_is_not_null(self_or_null)) {
             localsplus_start = args;
             n_locals_already_filled = argcount;
+            is_inlineable = true;
         }
         OUT_OF_SPACE_IF_NULL(new_frame =
                              frame_new(ctx, co, localsplus_start, n_locals_already_filled, 0));
+        new_frame->is_inlineable = is_inlineable;
     }
 
     op(_POP_FRAME, (retval -- res)) {
         SYNC_SP();
+        REPLACE_OP(this_instr, _POP_FRAME,
+                   this_instr->oparg,
+                   (stack_pointer - _Py_uop_prev_frame(ctx)->stack_pointer));
         ctx->frame->stack_pointer = stack_pointer;
         frame_pop(ctx);
         stack_pointer = ctx->frame->stack_pointer;
@@ -561,10 +579,26 @@ dummy_func(void) {
 
     op(_PUSH_FRAME, (new_frame: _Py_UOpsAbstractFrame * -- unused if (0))) {
         SYNC_SP();
+        new_frame->real_localsplus = new_frame->locals;
         ctx->frame->stack_pointer = stack_pointer;
         ctx->frame = new_frame;
         ctx->curr_frame_depth++;
         stack_pointer = new_frame->stack_pointer;
+    }
+
+    op(_PUSH_FRAME_INLINEABLE, (new_frame: _Py_UOpsAbstractFrame * -- unused if (0))) {
+        SYNC_SP();
+        new_frame->real_localsplus = ctx->frame->real_localsplus;
+        ctx->frame->stack_pointer = stack_pointer;
+        ctx->frame = new_frame;
+        ctx->curr_frame_depth++;
+        stack_pointer = new_frame->stack_pointer;
+        // First 32 bits set to locals_len, last 32 bits set to stack_len.
+        uint64_t operand = (((uint64_t)(new_frame->locals_len)) << 32) | (new_frame->stack_len);
+        REPLACE_OP(this_instr, _PUSH_FRAME_INLINEABLE, oparg, operand);
+        if (!new_frame->is_inlineable) {
+            REPLACE_OP(this_instr, _PUSH_FRAME, oparg, 0);
+        }
     }
 
     op(_UNPACK_SEQUENCE, (seq -- values[oparg])) {

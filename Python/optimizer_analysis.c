@@ -263,15 +263,14 @@ remove_globals(_PyInterpreterFrame *frame, _PyUOpInstruction *buffer,
 }
 
 
-
 #define STACK_LEVEL()     ((int)(stack_pointer - ctx->frame->stack))
 
 #define GETLOCAL(idx)          ((ctx->frame->locals[idx]))
 
 #define REPLACE_OP(INST, OP, ARG, OPERAND)    \
-    INST->opcode = OP;            \
-    INST->oparg = ARG;            \
-    INST->operand = OPERAND;
+    (INST)->opcode = OP;            \
+    (INST)->oparg = ARG;            \
+    (INST)->operand = OPERAND;
 
 #define OUT_OF_SPACE_IF_NULL(EXPR)     \
     do {                               \
@@ -286,6 +285,14 @@ remove_globals(_PyInterpreterFrame *frame, _PyUOpInstruction *buffer,
     OUT_OF_SPACE_IF_NULL(null = _Py_uop_sym_new_null(ctx)); \
     } while (0);
 
+static int
+real_localsplus_idx(_Py_UOpsContext *ctx, int oparg)
+{
+    assert(ctx->frame->real_localsplus != NULL);
+    int target = (int)(&GETLOCAL(oparg) - ctx->frame->real_localsplus);
+    assert(target >= 0);
+    return target;
+}
 
 /* Shortened forms for convenience, used in optimizer_bytecodes.c */
 #define sym_is_not_null _Py_uop_sym_is_not_null
@@ -363,6 +370,8 @@ optimize_uops(
     }
     ctx->curr_frame_depth++;
     ctx->frame = frame;
+    // Root frame should never be inlined.
+    frame->real_localsplus = frame->locals;
 
     for (_PyUOpInstruction *this_instr = trace;
          this_instr < trace + trace_len && !op_is_end(this_instr->opcode);
@@ -497,7 +506,11 @@ remove_unneeded_uops(_PyUOpInstruction *buffer, int buffer_size)
 static void
 peephole_opt(_PyInterpreterFrame *frame, _PyUOpInstruction *buffer, int buffer_size)
 {
+    _PyUOpInstruction *push_frame[MAX_ABSTRACT_FRAME_DEPTH];
+    int frame_depth = 1;
     PyCodeObject *co = (PyCodeObject *)frame->f_executable;
+    PyFunctionObject *func = NULL;
+    bool is_leaf_frame = false;
     for (int pc = 0; pc < buffer_size; pc++) {
         int opcode = buffer[pc].opcode;
         switch(opcode) {
@@ -518,9 +531,30 @@ peephole_opt(_PyInterpreterFrame *frame, _PyUOpInstruction *buffer, int buffer_s
                 break;
             }
             case _PUSH_FRAME:
+            {
+                is_leaf_frame = true;
+                push_frame[frame_depth] = &buffer[pc];
+                frame_depth++;
+                func = (PyFunctionObject *)buffer[pc].operand;
+                if (func == NULL) {
+                    co = NULL;
+                }
+                else {
+                    assert(PyFunction_Check(func));
+                    co = (PyCodeObject *)func->func_code;
+                }
+                assert(frame_depth <= MAX_ABSTRACT_FRAME_DEPTH);
+                break;
+            }
             case _POP_FRAME:
             {
-                PyFunctionObject *func = (PyFunctionObject *)buffer[pc].operand;
+                frame_depth--;
+                if (is_leaf_frame) {
+                    push_frame[frame_depth]->opcode = _PUSH_FRAME_INLINEABLE;
+                }
+                is_leaf_frame = false;
+                assert(frame_depth >= 1);
+                func = (PyFunctionObject *)buffer[pc].operand;
                 if (func == NULL) {
                     co = NULL;
                 }
@@ -533,6 +567,99 @@ peephole_opt(_PyInterpreterFrame *frame, _PyUOpInstruction *buffer, int buffer_s
             case _JUMP_TO_TOP:
             case _EXIT_TRACE:
                 return;
+        }
+    }
+}
+
+
+static bool
+function_decide_simple_inlineable(
+    _PyUOpInstruction *func_body_start,
+    _PyUOpInstruction *func_body_end)
+{
+    // Usually means MAKE_CELL or something
+    if (func_body_start->opcode != _RESUME_CHECK) {
+        return false;
+    }
+    func_body_start++;
+    _PyUOpInstruction *curr = func_body_start;
+    while (curr < func_body_end) {
+        int opcode = curr->opcode;
+        // We should be the leaf frame.
+        assert(opcode != _PUSH_FRAME && opcode != _PUSH_FRAME_INLINEABLE);
+        if (opcode == _POP_FRAME) {
+            return true;
+        }
+        if (_PyUop_Flags[curr->opcode] & (HAS_ESCAPES_FLAG | HAS_DEOPT_FLAG | HAS_ERROR_FLAG)) {
+            // Pure overrides error flag.
+            if (!(_PyUop_Flags[curr->opcode] & HAS_PURE_FLAG)) {
+                return false;
+            }
+        }
+        curr++;
+    }
+    Py_UNREACHABLE();
+}
+
+static void
+inline_simple_frames(_PyUOpInstruction *buffer, int buffer_size)
+{
+    bool did_inline = false;
+    for (int pc = 0; pc < buffer_size; pc++) {
+        int opcode = buffer[pc].opcode;
+        switch (opcode) {
+            case _PUSH_FRAME_INLINEABLE: {
+                assert(buffer[pc - 3].opcode == _CHECK_STACK_SPACE);
+                assert(buffer[pc - 2].opcode == _INIT_CALL_PY_EXACT_ARGS);
+                assert(buffer[pc - 1].opcode == _SAVE_RETURN_OFFSET);
+                assert(buffer[pc + 1].opcode == _CHECK_VALIDITY_AND_SET_IP ||
+                    buffer[pc + 1].opcode == _CHECK_VALIDITY);
+                // Skip over the CHECK_VALIDITY when deciding,
+                // as those can be optimized away later.
+                if (!function_decide_simple_inlineable(&buffer[pc + 2], buffer + buffer_size)) {
+                    buffer[pc].opcode = _PUSH_FRAME;
+                    break;
+                }
+                assert(buffer[pc + 2].opcode == _RESUME_CHECK);
+                did_inline = true;
+                uint64_t operand = buffer[pc].operand;
+                int locals_len = (int)(operand >> 32);
+                int stack_len = (int)(operand & 0xFFFFFFFF);
+                REPLACE_OP(&buffer[pc - 3], _GROW_TIER2_FRAME, locals_len + stack_len, 0);
+                REPLACE_OP(&buffer[pc - 2], _NOP, 0, 0);
+                REPLACE_OP(&buffer[pc - 1], _NOP, 0, 0);
+                REPLACE_OP(&buffer[pc], _PRE_INLINE, locals_len, 0);
+                REPLACE_OP(&buffer[pc + 1], _NOP, 0, 0);
+                REPLACE_OP(&buffer[pc + 2], _NOP, 0, 0);
+                break;
+            }
+            case _POP_FRAME: {
+                if (did_inline) {
+                    buffer[pc].oparg = (int)buffer[pc].operand;
+                    buffer[pc].opcode = _POST_INLINE;
+                }
+                did_inline = false;
+                break;
+            }
+            case _LOAD_FAST:
+            case _STORE_FAST:
+            case _LOAD_FAST_AND_CLEAR:
+                if (did_inline) {
+                    buffer[pc].oparg = (int)buffer[pc].operand;
+                    buffer[pc].operand = 0;
+                }
+                break;
+            case _SET_IP: {
+                if (did_inline) {
+                    REPLACE_OP(&buffer[pc], _NOP, 0, 0);
+                }
+                break;
+            }
+            case _JUMP_TO_TOP:
+            case _EXIT_TRACE:
+                return;
+            default:
+                break;
         }
     }
 }
@@ -571,6 +698,8 @@ _Py_uop_analyze_and_optimize(
     assert(err == 1);
 
     remove_unneeded_uops(buffer, buffer_size);
+    inline_simple_frames(buffer, buffer_size);
+    // remove_unneeded_uops(buffer, buffer_size);
 
     OPT_STAT_INC(optimizer_successes);
     return 1;
