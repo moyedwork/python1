@@ -695,7 +695,7 @@ extern void _PyUOpPrint(const _PyUOpInstruction *uop);
 
 
 PyObject **
-_PyObjectArray_FromStackRefArray(_PyStackRef *input, Py_ssize_t nargs, PyObject **scratch)
+_PyObjectArray_FromStackRefArrayBorrow(_PyStackRef *input, Py_ssize_t nargs, PyObject **scratch)
 {
     PyObject **result;
     if (nargs > MAX_STACKREF_SCRATCH) {

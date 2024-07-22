@@ -388,6 +388,9 @@ extern void _Py_RunGC(PyThreadState *tstate);
 extern void _PyGC_ImmortalizeDeferredObjects(PyInterpreterState *interp);
 #endif
 
+// Functions to clear generator frames
+extern int _PyGC_VisitFrameStack(struct _PyInterpreterFrame *frame, visitproc visit, void *arg);
+
 #ifdef __cplusplus
 }
 #endif

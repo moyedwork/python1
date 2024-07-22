@@ -843,12 +843,11 @@ dummy_func(
         }
 
         inst(STORE_SUBSCR_DICT, (unused/1, value, dict_st, sub_st -- )) {
-            PyObject *sub = PyStackRef_AsPyObjectBorrow(sub_st);
             PyObject *dict = PyStackRef_AsPyObjectBorrow(dict_st);
 
             DEOPT_IF(!PyDict_CheckExact(dict));
             STAT_INC(STORE_SUBSCR, hit);
-            int err = _PyDict_SetItem_Take2((PyDictObject *)dict, sub, PyStackRef_AsPyObjectSteal(value));
+            int err = _PyDict_SetItem_Take2((PyDictObject *)dict, PyStackRef_AsPyObjectSteal(sub_st), PyStackRef_AsPyObjectSteal(value));
             PyStackRef_CLOSE(dict_st);
             ERROR_IF(err, error);
         }
@@ -1764,7 +1763,7 @@ dummy_func(
         }
 
         inst(BUILD_STRING, (pieces[oparg] -- str)) {
-            STACKREFS_TO_PYOBJECTS(pieces, oparg, pieces_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(pieces, oparg, pieces_o);
             if (CONVERSION_FAILED(pieces_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -1783,13 +1782,7 @@ dummy_func(
         }
 
         inst(BUILD_LIST, (values[oparg] -- list)) {
-            STACKREFS_TO_PYOBJECTS(values, oparg, values_o);
-            if (CONVERSION_FAILED(values_o)) {
-                DECREF_INPUTS();
-                ERROR_IF(true, error);
-            }
-            PyObject *list_o = _PyList_FromArraySteal(values_o, oparg);
-            STACKREFS_TO_PYOBJECTS_CLEANUP(values_o);
+            PyObject *list_o = _PyList_FromStackRefSteal(values, oparg);
             ERROR_IF(list_o == NULL, error);
             list = PyStackRef_FromPyObjectSteal(list_o);
         }
@@ -1830,11 +1823,11 @@ dummy_func(
             }
             int err = 0;
             for (int i = 0; i < oparg; i++) {
-                PyObject *item = PyStackRef_AsPyObjectSteal(values[i]);
+                PyObject *item = PyStackRef_AsPyObjectBorrow(values[i]);
                 if (err == 0) {
                     err = PySet_Add(set_o, item);
                 }
-                Py_DECREF(item);
+                PyStackRef_CLOSE(values[i]);
             }
             if (err != 0) {
                 Py_DECREF(set_o);
@@ -1844,7 +1837,7 @@ dummy_func(
         }
 
         inst(BUILD_MAP, (values[oparg*2] -- map)) {
-            STACKREFS_TO_PYOBJECTS(values, oparg*2, values_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(values, oparg*2, values_o);
             if (CONVERSION_FAILED(values_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -1887,7 +1880,7 @@ dummy_func(
 
             assert(PyTuple_CheckExact(keys_o));
             assert(PyTuple_GET_SIZE(keys_o) == (Py_ssize_t)oparg);
-            STACKREFS_TO_PYOBJECTS(values, oparg, values_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(values, oparg, values_o);
             if (CONVERSION_FAILED(values_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -3101,7 +3094,7 @@ dummy_func(
 
         inst(LOAD_SPECIAL, (owner -- attr, self_or_null)) {
             assert(oparg <= SPECIAL_MAX);
-            PyObject *owner_o = PyStackRef_AsPyObjectSteal(owner);
+            PyObject *owner_o = PyStackRef_AsPyObjectBorrow(owner);
             PyObject *name = _Py_SpecialMethods[oparg].name;
             PyObject *self_or_null_o;
             attr = PyStackRef_FromPyObjectSteal(_PyObject_LookupSpecialMethod(owner_o, name, &self_or_null_o));
@@ -3379,9 +3372,12 @@ dummy_func(
                 DISPATCH_INLINED(new_frame);
             }
             /* Callable is not a normal Python function */
-            STACKREFS_TO_PYOBJECTS(args, total_args, args_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(args, total_args, args_o);
             if (CONVERSION_FAILED(args_o)) {
-                DECREF_INPUTS();
+                PyStackRef_CLOSE(callable);
+                for (int i = 0; i < total_args; i++) {
+                    PyStackRef_CLOSE(args[i]);
+                }
                 ERROR_IF(true, error);
             }
             PyObject *res_o = PyObject_Vectorcall(
@@ -3511,7 +3507,7 @@ dummy_func(
                 total_args++;
             }
             /* Callable is not a normal Python function */
-            STACKREFS_TO_PYOBJECTS(args, total_args, args_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(args, total_args, args_o);
             if (CONVERSION_FAILED(args_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -3745,7 +3741,7 @@ dummy_func(
             PyTypeObject *tp = (PyTypeObject *)callable_o;
             DEOPT_IF(tp->tp_vectorcall == NULL);
             STAT_INC(CALL, hit);
-            STACKREFS_TO_PYOBJECTS(args, total_args, args_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(args, total_args, args_o);
             if (CONVERSION_FAILED(args_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -3815,7 +3811,7 @@ dummy_func(
             STAT_INC(CALL, hit);
             PyCFunction cfunc = PyCFunction_GET_FUNCTION(callable_o);
             /* res = func(self, args, nargs) */
-            STACKREFS_TO_PYOBJECTS(args, total_args, args_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(args, total_args, args_o);
             if (CONVERSION_FAILED(args_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -3859,7 +3855,7 @@ dummy_func(
                 (PyCFunctionFastWithKeywords)(void(*)(void))
                 PyCFunction_GET_FUNCTION(callable_o);
 
-            STACKREFS_TO_PYOBJECTS(args, total_args, args_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(args, total_args, args_o);
             if (CONVERSION_FAILED(args_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -4023,7 +4019,7 @@ dummy_func(
             PyCFunctionFastWithKeywords cfunc =
                 (PyCFunctionFastWithKeywords)(void(*)(void))meth->ml_meth;
 
-            STACKREFS_TO_PYOBJECTS(args, nargs, args_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(args, nargs, args_o);
             if (CONVERSION_FAILED(args_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -4104,7 +4100,7 @@ dummy_func(
                 (PyCFunctionFast)(void(*)(void))meth->ml_meth;
             int nargs = total_args - 1;
 
-            STACKREFS_TO_PYOBJECTS(args, nargs, args_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(args, nargs, args_o);
             if (CONVERSION_FAILED(args_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);
@@ -4188,7 +4184,7 @@ dummy_func(
                 DISPATCH_INLINED(new_frame);
             }
             /* Callable is not a normal Python function */
-            STACKREFS_TO_PYOBJECTS(args, total_args, args_o);
+            STACKREFS_TO_PYOBJECTS_BORROW(args, total_args, args_o);
             if (CONVERSION_FAILED(args_o)) {
                 DECREF_INPUTS();
                 ERROR_IF(true, error);

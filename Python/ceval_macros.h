@@ -455,12 +455,12 @@ do { \
 #define MAX_STACKREF_SCRATCH 10
 
 #ifdef Py_GIL_DISABLED
-#define STACKREFS_TO_PYOBJECTS(ARGS, ARG_COUNT, NAME) \
+#define STACKREFS_TO_PYOBJECTS_BORROW(ARGS, ARG_COUNT, NAME) \
     /* +1 because vectorcall might use -1 to write self */ \
     PyObject *NAME##_temp[MAX_STACKREF_SCRATCH+1]; \
-    PyObject **NAME = _PyObjectArray_FromStackRefArray(ARGS, ARG_COUNT, NAME##_temp + 1);
+    PyObject **NAME = _PyObjectArray_FromStackRefArrayBorrow(ARGS, ARG_COUNT, NAME##_temp + 1);
 #else
-#define STACKREFS_TO_PYOBJECTS(ARGS, ARG_COUNT, NAME) \
+#define STACKREFS_TO_PYOBJECTS_BORROW(ARGS, ARG_COUNT, NAME) \
     PyObject **NAME = (PyObject **)ARGS; \
     assert(NAME != NULL);
 #endif
