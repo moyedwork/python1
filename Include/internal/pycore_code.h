@@ -590,6 +590,8 @@ extern _Py_CODEUNIT _Py_GetBaseCodeUnit(PyCodeObject *code, int offset);
 
 extern int _PyInstruction_GetLength(PyCodeObject *code, int offset);
 
+extern PyObject *_PyInstrumentation_BranchesIterator(PyCodeObject *code);
+
 #ifdef __cplusplus
 }
 #endif
