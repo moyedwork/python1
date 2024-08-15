@@ -47,11 +47,23 @@ jobs:
           ${{ inputs.free-threading && '--disable-gil' || '' }} \
           --prefix=/opt/python-dev \
           --with-openssl="$(brew --prefix openssl@3.0)"
+    - name: Build CPython for compiler warning check
+      if : ${{ !inputs.free-threading && inputs.os == 'macos-14' }}
+      run: set -o pipefail; make -j1 2>&1 | tee compiler_output_macos.txt
     - name: Build CPython
-      run: set -o pipefail; make -j8 2>&1 | tee compiler_output.txt
+      if : ${{ inputs.free-threading || inputs.os != 'macos-14' }}
+      run: make -j8
     - name: Display build info
       run: make pythoninfo
     - name: Check compiler warnings
-      run: python3 Tools/build/check_warnings.py --compiler-output-file-path=compiler_output.txt --warning-ignore-file-path=Tools/build/.warningignore_macos --compiler-output-type=clang
+      if : ${{ !inputs.free-threading && inputs.os == 'macos-14' }}
+      run: >-
+        python3 Tools/build/check_warnings.py
+        --compiler-output-file-path=compiler_output_macos.txt
+        --warning-ignore-file-path=Tools/build/.warningignore_macos
+        --compiler-output-type=clang
+        --fail-on-regression
+        --fail-on-improvement
+        --path-prefix="./"
     - name: Tests
       run: make test
